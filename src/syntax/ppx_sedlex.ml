@@ -378,7 +378,7 @@ let mapper =
                 ) cases
             in
             gen_definition lexbuf cases error
-      | [%expr let [%p? {ppat_desc=Ppat_var{txt=name}}] = [%sedlex.regexp? [%p? p]] in [%e? body]] ->
+      | [%expr let [%p? {ppat_desc=Ppat_var{txt=name}}] = [%re? [%p? p]] in [%e? body]] ->
           (this # define_regexp name p) # expr body
       | [%expr [%sedlex [%e? _]]] ->
         err e.pexp_loc "the %sedlex extension is only recognized on match expressions"
@@ -393,7 +393,7 @@ let mapper =
       let l = List.concat
         (List.map
            (function
-             | [%stri let [%p? {ppat_desc=Ppat_var{txt=name}}] = [%sedlex.regexp? [%p? p]]] as i ->
+             | [%stri let [%p? {ppat_desc=Ppat_var{txt=name}}] = [%re? [%p? p]]] as i ->
                regexps := i :: !regexps;
                mapper := !mapper # define_regexp name p;
                []
