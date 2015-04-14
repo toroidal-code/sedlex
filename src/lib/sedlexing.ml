@@ -35,26 +35,64 @@ type state = int
 type apos = int
 
 (* Position state *)
-type position_info = {
-  position : int; (* Buffer position *)
-  line : int;
-  line_position : int;
+type position = {
+  file_name     : string;  (* The file name of the currently lexing file *)
+  buffer_offset : int;     (* Current character position in buffer *)
+  line_number   : int;     (* Current line number in buffer *)
+  line_offset   : int;     (* The offset of the beginning of the current line from the 
+                            * beginning of the buffer.*)
 }
 
 (* Support bits for position type *)
 let newline_char = 0xA (* \n *)
-let empty_position = {position=0;line=0;line_position=0}
+let empty_position = {file_name=""; buffer_offset=0; line_number=0; line_offset=0}
+
 (* Move to next character; last character was not newline *)
-let pos_nextchar {position;line;line_position} = {position=position+1;line;line_position=line_position+1}
+let pos_nextchar { file_name; buffer_offset; line_number; line_offset } = {
+  file_name;
+  buffer_offset = buffer_offset + 1;
+  line_number = line_number;
+  line_offset = line_offset
+}
+  
 (* Move to next character; last character was newline *)
-let pos_nextline {position;line} = {position=position+1;line=line+1;line_position=0}
+let pos_nextline { file_name; buffer_offset; line_number; _ } = {
+  file_name;
+  buffer_offset = buffer_offset + 1;
+  line_number = line_number + 1;
+  line_offset = buffer_offset + 1
+}
+
 (* Translate position for array shift *)
-let pos_shift_index ({position} as pos) by = {pos with position=position+by}
+let pos_shift_index ({ buffer_offset; line_offset; _ } as pos) by = {
+  pos with buffer_offset = buffer_offset + by;
+           line_offset = line_offset + by;
+  }
+
 (* A new character is being read; update values as appropriate *)
 let pos_next pos buf =
-  (if buf.(pos.position) = newline_char then pos_nextline else pos_nextchar) pos
-let pos_lexing {position;line;line_position} =
-  Lexing.{pos_fname=""; pos_lnum=line; pos_cnum=line_position; pos_bol=position-line_position}
+  let _pos_next =
+    if Array.get buf pos.buffer_offset = newline_char
+    then pos_nextline
+    else pos_nextchar
+  in _pos_next pos
+
+
+let pos_lexing { file_name; buffer_offset; line_number; line_offset } =
+  Lexing.{
+    pos_fname = file_name;
+    pos_lnum  = line_number;
+    pos_cnum  = buffer_offset;
+    pos_bol   = line_offset
+  }                             (* One-to-one correlation for use with menhir *)
+
+let pos_sedlexing { Lexing.pos_fname; Lexing.pos_lnum;
+                    Lexing.pos_cnum; Lexing.pos_bol } = {
+  file_name = pos_fname;
+  line_number = pos_lnum;
+  buffer_offset = pos_cnum;
+  line_offset = pos_bol;
+}
 
 type lexbuf = {
   refill: (int array -> int -> int -> int);
@@ -62,10 +100,10 @@ type lexbuf = {
   mutable len: int;     (* Number of meaningful chars in buffer *)
   mutable offset: apos; (* Position of the first char in buffer
 			    in the input stream *)
-  mutable pos:   position_info;
-  mutable start: position_info; (* First char we need to keep visible *)
-
-  mutable marked_pos: position_info;
+  mutable start_pos : position; (* First char we need to keep visible *)
+  mutable curr_pos  : position; (* The current position *)
+  
+  mutable marked_pos: position;
   mutable marked_state: state;
 
   mutable finished: bool;
@@ -78,8 +116,8 @@ let empty_lexbuf = {
   buf = [| |];
   len = 0;
   offset = 0;
-  pos = empty_position;
-  start = empty_position;
+  start_pos = empty_position;
+  curr_pos = empty_position;
   marked_pos = empty_position;
   marked_state = 0; (* FIXME: Comment needed, why is this initialized to 0? *)
   finished = false;
@@ -107,8 +145,7 @@ let from_gen s =
 let from_stream s = from_gen @@ gen_of_stream s
 
 let from_int_array a =
-  let len = Array.length a in
-  {
+  let len = Array.length a in {
     empty_lexbuf with
       buf = Array.init len (fun i -> a.(i));
       len = len;
@@ -119,7 +156,7 @@ let from_int_array a =
 let refill lexbuf =
   if lexbuf.len + chunk_size > Array.length lexbuf.buf
   then begin
-    let s = lexbuf.start.position in
+    let s = lexbuf.start_pos.buffer_offset in
     let ls = lexbuf.len - s in
     if ls + chunk_size <= Array.length lexbuf.buf then
       Array.blit lexbuf.buf s lexbuf.buf 0 ls
@@ -131,11 +168,11 @@ let refill lexbuf =
     end;
     lexbuf.len <- ls;
     lexbuf.offset <- lexbuf.offset + s;
-    lexbuf.pos <- pos_shift_index lexbuf.pos (-s); (* Adjust coordinate system *)
+    lexbuf.curr_pos <- pos_shift_index lexbuf.curr_pos (-s); (* Adjust coordinate system *)
     lexbuf.marked_pos <- pos_shift_index lexbuf.marked_pos (-s);
-    lexbuf.start <- empty_position;
+    lexbuf.start_pos <- empty_position;
   end;
-  let n = lexbuf.refill lexbuf.buf lexbuf.pos.position chunk_size in
+  let n = lexbuf.refill lexbuf.buf lexbuf.curr_pos.buffer_offset chunk_size in
   if (n = 0)
   then begin
     lexbuf.buf.(lexbuf.len) <- eof;
@@ -145,51 +182,54 @@ let refill lexbuf =
 
 let next lexbuf =
   let i =
-    if lexbuf.pos.position = lexbuf.len then
+    if lexbuf.curr_pos.buffer_offset = lexbuf.len then
       if lexbuf.finished then eof
-      else (refill lexbuf; lexbuf.buf.(lexbuf.pos.position))
-    else lexbuf.buf.(lexbuf.pos.position)
+      else (refill lexbuf; lexbuf.buf.(lexbuf.curr_pos.buffer_offset))
+    else lexbuf.buf.(lexbuf.curr_pos.buffer_offset)
   in
-  if i = eof then lexbuf.finished <- true else lexbuf.pos <- (pos_next lexbuf.pos lexbuf.buf);
+  if i = eof
+  then lexbuf.finished <- true
+  else lexbuf.curr_pos <- (pos_next lexbuf.curr_pos lexbuf.buf);
   i
 
 let start lexbuf =
-  lexbuf.start <- lexbuf.pos;
-  lexbuf.marked_pos <- lexbuf.pos;
+  lexbuf.start_pos <- lexbuf.curr_pos;
+  lexbuf.marked_pos <- lexbuf.curr_pos;
   lexbuf.marked_state <- start_state
 
 let mark lexbuf i =
-  lexbuf.marked_pos <- lexbuf.pos;
+  lexbuf.marked_pos <- lexbuf.curr_pos;
   lexbuf.marked_state <- i
 
 let backtrack lexbuf =
-  lexbuf.pos <- lexbuf.marked_pos;
+  lexbuf.curr_pos <- lexbuf.marked_pos;
   lexbuf.marked_state
 
 let rollback lexbuf =
-  lexbuf.pos <- lexbuf.start
+  lexbuf.curr_pos <- lexbuf.start_pos
 
 let pair_filter x y arg = (x arg, y arg)
 
-let lexeme_start lexbuf = lexbuf.start.position + lexbuf.offset
-let lexeme_end lexbuf = lexbuf.pos.position + lexbuf.offset
+let lexeme_start lexbuf = lexbuf.start_pos.buffer_offset + lexbuf.offset
+let lexeme_end lexbuf = lexbuf.curr_pos.buffer_offset + lexbuf.offset
 let loc = pair_filter lexeme_start lexeme_end
 
 (* Convert to externally usable structure *)
-let lexeme_start_position lexbuf = pos_lexing @@ pos_shift_index lexbuf.start lexbuf.offset
-let lexeme_end_position lexbuf = pos_lexing @@ pos_shift_index lexbuf.pos lexbuf.offset
+let lexeme_start_position lexbuf = pos_lexing @@ pos_shift_index lexbuf.start_pos lexbuf.offset
+let lexeme_end_position lexbuf = pos_lexing @@ pos_shift_index lexbuf.curr_pos lexbuf.offset
 let loc_position = pair_filter lexeme_start_position lexeme_end_position
 
-let lexeme_length lexbuf = lexbuf.pos.position - lexbuf.start.position
+let lexeme_length lexbuf = lexbuf.curr_pos.buffer_offset - lexbuf.start_pos.buffer_offset
 
 let sub_lexeme lexbuf pos len =
-  Array.sub lexbuf.buf (lexbuf.start.position + pos) len
+  Array.sub lexbuf.buf (lexbuf.start_pos.buffer_offset + pos) len
 
 let lexeme lexbuf =
-  Array.sub lexbuf.buf (lexbuf.start.position) (lexbuf.pos.position - lexbuf.start.position)
+  Array.sub lexbuf.buf (lexbuf.start_pos.buffer_offset)
+    (lexbuf.curr_pos.buffer_offset - lexbuf.start_pos.buffer_offset)
 
 let lexeme_char lexbuf pos =
-  lexbuf.buf.(lexbuf.start.position + pos)
+  lexbuf.buf.(lexbuf.start_pos.buffer_offset + pos)
 
 
 module Latin1 = struct
@@ -220,11 +260,14 @@ module Latin1 = struct
 
   let sub_lexeme lexbuf pos len =
     let s = Bytes.create len in
-    for i = 0 to len - 1 do Bytes.set s i (to_latin1 lexbuf.buf.(lexbuf.start.position + pos + i)) done;
+    for i = 0 to len - 1 do
+      let char = Array.get lexbuf.buf (lexbuf.start_pos.buffer_offset + pos + i) in
+      Bytes.set s i (to_latin1 char)
+    done;
     Bytes.to_string s
 
   let lexeme lexbuf =
-    sub_lexeme lexbuf 0 (lexbuf.pos.position - lexbuf.start.position)
+    sub_lexeme lexbuf 0 (lexbuf.curr_pos.buffer_offset - lexbuf.start_pos.buffer_offset)
 end
 
 
@@ -372,10 +415,10 @@ module Utf8 = struct
     from_int_array (Helper.to_int_array s 0 (String.length s))
 
   let sub_lexeme lexbuf pos len =
-    Helper.from_int_array lexbuf.buf (lexbuf.start.position + pos) len
+    Helper.from_int_array lexbuf.buf (lexbuf.start_pos.buffer_offset + pos) len
 
   let lexeme lexbuf =
-    sub_lexeme lexbuf 0 (lexbuf.pos.position - lexbuf.start.position)
+    sub_lexeme lexbuf 0 (lexbuf.curr_pos.buffer_offset - lexbuf.start_pos.buffer_offset)
 end
 
 
@@ -489,8 +532,8 @@ module Utf16 = struct
     from_int_array a
 
   let sub_lexeme lb pos len bo bom  =
-    Helper.from_int_array bo lb.buf (lb.start.position + pos) len bom
+    Helper.from_int_array bo lb.buf (lb.start_pos.buffer_offset + pos) len bom
 
   let lexeme lb bo bom =
-    sub_lexeme lb 0 (lb.pos.position - lb.start.position) bo bom
+    sub_lexeme lb 0 (lb.curr_pos.buffer_offset - lb.start_pos.buffer_offset) bo bom
 end

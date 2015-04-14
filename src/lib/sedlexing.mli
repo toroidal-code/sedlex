@@ -21,6 +21,15 @@
 
     Of course, you'll probably want to define functions like [lexeme] to
     be used in the lexers semantic actions.  *)
+type apos = int;;
+type state = int;;
+
+type position = {
+  file_name     : string;
+  buffer_offset : int;   
+  line_number   : int;   
+  line_offset   : int;   
+}
 
 type lexbuf
       (** The type of lexer buffers. A lexer buffer is the argument passed
@@ -29,6 +38,20 @@ type lexbuf
           scanners, including the code points of the token currently scanned,
           its position from the beginning of the input stream,
           and the current position of the lexer. *)
+ = {
+   refill: (int array -> int -> int -> int);
+   mutable buf: int array;
+   mutable len: int;     (* Number of meaningful chars in buffer *)
+   mutable offset: apos; (* Position of the first char in buffer
+			   in the input stream *)
+   mutable start_pos : position; (* First char we need to keep visible *)
+   mutable curr_pos  : position; (* The current position *)
+   
+   mutable marked_pos: position;
+   mutable marked_state: state;
+
+   mutable finished: bool;
+}
 
 exception InvalidCodepoint of int
     (** Raised by some functions to signal that some code point is not
@@ -79,6 +102,10 @@ val loc: lexbuf -> int * int
     (** [Sedlexing.loc lexbuf] returns the pair
         [(Sedlexing.lexeme_start lexbuf,Sedlexing.lexeme_end
         lexbuf)]. *)
+
+val pos_sedlexing: Lexing.position -> position
+
+val pos_lexing : position -> Lexing.position
 
 val lexeme_start_position: lexbuf -> Lexing.position
     (** [Sedlexing.lexeme_start_position lexbuf] returns a Lexing.position
