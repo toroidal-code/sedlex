@@ -3,10 +3,16 @@
 (* Copyright 2005, 2013 by Alain Frisch and LexiFi.                       *)
 
 open Longident
+open Migrate_parsetree
+open Ast_405
 open Parsetree
 open Asttypes
 open Ast_helper
-open Ast_convenience
+open Ast_convenience_405
+
+module Ast_mapper_class = Ast_mapper_class_405
+
+let ocaml_version = Versions.ocaml_405
 
 module Cset = Sedlex_cset
 
@@ -73,7 +79,6 @@ let decision_table p =
 
 
 (* Helpers to build AST *)
-
 
 let appfun s l = app (evar s) l
 let glb_value name def = Str.value Nonrecursive [Vb.mk (pvar name) def]
@@ -264,6 +269,11 @@ let regexp_for_string s =
 let err loc s =
   raise (Location.Error (Location.error ~loc ("Sedlex: " ^ s)))
 
+let rec repeat r = function
+  | 0, 0 -> Sedlex.eps
+  | 0, m -> Sedlex.alt Sedlex.eps (Sedlex.seq r (repeat r (0, m - 1)))
+  | n, m -> Sedlex.seq r (repeat r (n - 1, m - 1))
+
 let regexp_of_pattern env =
   let rec char_pair_op func name p tuple = (* Construct something like Sub(a,b) *)
     match tuple with
@@ -286,6 +296,20 @@ let regexp_of_pattern env =
         Sedlex.rep (aux p)
     | Ppat_construct ({txt = Lident "Plus"}, Some p) ->
         Sedlex.plus (aux p)
+    | Ppat_construct
+        ({txt = Lident "Rep"},
+         Some {ppat_desc=Ppat_tuple[p0; {ppat_desc=Ppat_constant (i1 as i2)|Ppat_interval(i1, i2)}]}) ->
+         begin match Constant.of_constant i1, Constant.of_constant i2 with
+         | Pconst_integer(i1,_), Pconst_integer(i2,_) ->
+             let i1 = int_of_string i1 in
+             let i2 = int_of_string i2 in
+             if 0 <= i1 && i1 <= i2 then repeat (aux p0) (i1, i2)
+             else err p.ppat_loc "Invalid range for Rep operator"
+         | _ ->
+             err p.ppat_loc "Rep must take an integer constant or interval"
+         end
+    | Ppat_construct ({txt = Lident "Rep"}, _) ->
+        err p.ppat_loc "the Rep operator takes 2 arguments"
     | Ppat_construct ({txt = Lident "Opt"}, Some p) ->
         Sedlex.alt Sedlex.eps (aux p)
     | Ppat_construct ({txt = Lident "Compl"}, arg) ->
@@ -343,7 +367,7 @@ let regexp_of_pattern env =
   aux
 
 
-let mapper =
+let mapper cookies =
   object(this)
     inherit Ast_mapper_class.mapper as super
 
@@ -406,7 +430,7 @@ let mapper =
       if toplevel then
         let sub = {< toplevel = false >} in
         let previous =
-          match Ast_mapper.get_cookie "sedlex.regexps" with
+          match Driver.get_cookie cookies "sedlex.regexps" ocaml_version with
           | Some {pexp_desc = Pexp_extension (_, PStr l)} -> l
           | Some _ -> assert false
           | None -> []
@@ -414,13 +438,15 @@ let mapper =
         let l, regexps = sub # structure_with_regexps (previous @ l) in
         let parts = List.map partition (get_partitions ()) in
         let tables = List.map table (get_tables ()) in
-        Ast_mapper.set_cookie "sedlex.regexps" (Exp.extension (Location.mknoloc "regexps", PStr regexps));
+        Driver.set_cookie cookies "sedlex.regexps" ocaml_version (Exp.extension (Location.mknoloc "regexps", PStr regexps));
         tables @ parts @ l
       else
         fst (this # structure_with_regexps l)
 
  end
 
-
 let () =
-  Ast_mapper.register "sedlex" (fun _ -> Ast_mapper_class.to_mapper mapper)
+  Driver.register
+    ~name:"sedlex"
+    ocaml_version
+    (fun _ cookies -> Ast_mapper_class.to_mapper (mapper cookies))

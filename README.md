@@ -64,10 +64,10 @@ Guard expressions are not allowed.)
 
 where:
 - lexbuf is an arbitrary lowercase identifier, which must refer to
-  an existing value of type [Sedlexing.lexbuf].
+  an existing value of type `Sedlexing.lexbuf`.
 - the Ri are regular expressions (see below);
 - the ei and def are OCaml expressions (called actions) of the same type
-  (the type for the whole lexer definitioon).
+  (the type for the whole lexer definition).
 
 Unlike ocamllex, lexers work on stream of Unicode codepoints, not
 bytes.
@@ -87,6 +87,8 @@ Regular expressions are syntactically OCaml patterns:
 - `Star R` : Kleene star (0 or more repetition)
 - `Plus R` : equivalent to `R, R*`
 - `Opt R` : equivalent to `("" | R)`
+- `Rep (R, n)` : equivalent to `R{n}`
+- `Rep (R, n .. m)` : equivalent to `R{n, m}`
 - `Chars "..."` : recognize any character in the string
 - `Compl R` : assume that R is a single-character length regexp (see below)
   and recognize the complement set
@@ -170,11 +172,10 @@ The quick way:
 
 
 Otherwise, the first thing to do is to compile and install sedlex.
-You need a recent version of OCaml.
+You need a recent version of OCaml and jbuilder.
 
 ```
-  make all
-  make opt (* optional *)
+  make
 ```
 
 ### With findlib
@@ -182,7 +183,7 @@ You need a recent version of OCaml.
 If you have findlib, you can use it to install and use sedlex.
 The name of the findlib package is "sedlex".
 
-Installation (after "make all" and "make opt"):
+Installation (after "make"):
 
 ```
   make install
@@ -221,3 +222,4 @@ link the application with the runtime support library for sedlex
 - Peter Zotov:
   - improvements to the build system
   - switched parts of ppx_sedlex to using concrete syntax (with ppx_metaquot)
+- Steffen Smolka: port to jbuilder
